@@ -18,13 +18,16 @@ CATEGORIES = {f"A{index:02}:2025" for index in range(1, 11)}
 class MockModelAPI(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        prompt = body["messages"][0]["content"]
         if (
             self.path != "/v1/chat/completions"
             or self.headers.get("Authorization") != "Bearer synthetic-token"
             or body.get("model") != MODEL
             or body.get("response_format") != {"type": "json_object"}
             or "tools" in body
-            or "OWASP Web Application Top 10:2025" not in body["messages"][0]["content"]
+            or "OWASP Web Application Top 10:2025" not in prompt
+            or "Identify the trust boundary" not in prompt
+            or "Use needs_validation when a specific missing fact" not in prompt
             or list(json.loads(body["messages"][1]["content"])) != [FIXTURE]
         ):
             self.send_error(400, "Unexpected synthetic review request")
