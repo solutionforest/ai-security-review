@@ -1,68 +1,166 @@
 # AI Security Review
 
-A Rust CLI for advisory, source-only reviews against the
+A Rust CLI for advisory source-code review against the
 [OWASP Web Application Top 10:2025](https://top10.owasp.org/2025/).
-It reads selected Git blobs at an immutable commit and sends them to an
-OpenAI-compatible chat completions API (DeepSeek by default). It does not
-execute the reviewed application or give the model tools.
+It reads selected files at an exact Git commit, sends their text to an
+OpenAI-compatible chat completions API, and validates a JSON report against the
+supplied paths, line numbers, and OWASP categories. The CLI treats reviewed code
+as data and gives the model zero tools. Use the report to guide human review.
 
-## Model configuration
+DeepSeek is the default. You can point the CLI at an approved hosted provider or
+a compatible internal model gateway. A self-hosted runner controls where the CLI
+runs. The model endpoint still receives every selected path and its contents.
+Use the synthetic fixture first and send company source only to a provider
+approved for that repo.
 
-| Variable | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `AI_REVIEW_API_KEY` | yes | — | Bearer token for the API. `DEEPSEEK_API_KEY` is accepted as a fallback. |
-| `AI_REVIEW_BASE_URL` | no | `https://api.deepseek.com` | API base URL; the CLI calls `<base>/chat/completions`. Must be `https://`, or `http://` on `localhost`/`127.0.0.1`. |
-| `AI_REVIEW_MODEL` | no | `deepseek-flash` | Model name sent in the request. |
+## 1. Prepare a Linux runner
 
-Examples: `https://api.openai.com/v1` with `gpt-5-mini`, or a private
-vLLM/Ollama gateway such as `https://llm.internal.example/v1`. The provider
-must support `response_format: {"type": "json_object"}`. The DeepSeek-only
-`thinking` switch is sent only when the host is `api.deepseek.com`.
-
-## Build and test
-
-Use Rust 1.100.0, Git, a C compiler, and CMake. Build on Linux for the
-runner's architecture.
-
-```sh
-cargo +1.100.0 test --locked
-cargo +1.100.0 build --locked --release --bin ai-security-review
-```
-
-## First run on a self-hosted runner
-
-1. Register a disposable Linux runner for the pilot and restrict it to the
-   protected review workflow. Use the `ai-review` label when routing the
-   manual job to it.
-2. Check out the trusted reviewer ref and build it using the command above.
-   Give the job read-only GitHub permissions. Use the reviewer's synthetic
-   fixture for the first run. For actual reviews, pass a separate checkout of
-   the target repo and a maintainer-selected commit and file list. Keep target
-   content out of workflow instructions and executable steps.
-3. Set the API key as the GitHub environment secret `AI_REVIEW_API_KEY` on
-   an environment restricted to the protected workflow's branch, and set
-   `AI_REVIEW_BASE_URL` / `AI_REVIEW_MODEL` as environment variables if you
-   are not using DeepSeek. Inject the secret only into the step that invokes
-   the CLI. From the reviewer checkout,
-   run the fixture with:
+1. Provision a dedicated, disposable Linux VM. Use an unprivileged account for
+   the runner. Give the VM access to GitHub Actions, the Rust toolchain and crate
+   sources needed by the build, and the selected model endpoint. Use the
+   [GitHub runner network requirements](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#communication)
+   to configure outbound access, including access for artifact upload.
+2. Install Git, a C compiler, CMake, CA certificates, and
+   [rustup](https://rustup.rs/) under the runner account. On Ubuntu, the
+   system prerequisites can be installed with
+   `sudo apt-get install git build-essential cmake ca-certificates`.
+   From the runner account, install and verify the toolchain:
 
    ```sh
-   target/release/ai-security-review . "$(git rev-parse HEAD)" fixtures/policy.txt > review.json
+   rustup toolchain install 1.100.0 --profile minimal
+   cargo +1.100.0 --version
    ```
 
-4. Upload `review.json` as a short-lived private artifact only after a
-   successful review. Use human triage before acting on findings.
+3. In the private reviewer repo, open **Settings → Actions → Runners →
+   New self-hosted runner**. Select **Linux** and the VM's architecture.
+   Run the download and checksum commands GitHub provides on the VM.
+   Run its generated `./config.sh` command with
+   `--labels ai-review --ephemeral` appended. The generated token registers
+   the runner with GitHub. Keep it private and use it only on the VM.
+4. From the runner directory, start `./run.sh` as the runner account and
+   leave it running until the job picks it up. Verify GitHub shows the runner
+   as **Idle** with the `self-hosted`, `linux`, and `ai-review` labels.
+   An ephemeral runner takes one job and deregisters. Destroy the VM after the
+   run and register a fresh one for the next job.
+   [GitHub registration](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners) ·
+   [Ephemeral runners](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling)
 
-The CLI accepts 1–20 explicit repository-relative UTF-8 file paths with up to
-64 KiB of content in total. Pass only files approved for the configured model.
-The model provider receives the selected paths and text, including when
-Actions runs on your own VM; use an internal endpoint if source must stay on
-your network. Keep source, credentials, and reports out of workflow logs.
-A report covers the selected files at the reported SHA and should be handled
-as sensitive. Failed requests, incomplete model output, and invalid reports
-return a nonzero exit code.
+For an organization-managed runner, use a dedicated runner group restricted
+to the private reviewer repo. Restrict its workflow access to the protected
+review workflow where available, and use the group along with the
+`ai-review` label in `runs-on`.
+[Runner group access](https://docs.github.com/en/enterprise-cloud@latest/actions/how-tos/manage-runners/self-hosted-runners/manage-access)
 
-The default model is DeepSeek Flash with the provider's JSON output mode.
-The report records the model name used.
-The repository embeds an original review prompt and the official OWASP
-category names. It does not bundle any of the evaluated third-party skills.
+## 2. Set the provider and API secret
+
+1. In the private reviewer repo, open **Settings → Environments → New
+   environment** and name it `security-review`.
+2. Under **Deployment branches and tags**, choose **Selected branches and
+   tags** and add a **Branch** rule for `main`. Protect `main` with your
+   usual pull request review rules.
+3. Under **Environment secrets**, select **Add secret**. Set the name to
+   `AI_REVIEW_API_KEY` and paste the provider API key as the value. This is the
+   model API credential. GitHub's runner registration token is used in step 1
+   above. Keep the API key out of source, YAML, command arguments, and logs.
+4. For a non-default provider, add `AI_REVIEW_BASE_URL` and `AI_REVIEW_MODEL`
+   under **Environment variables**. Confirm the hostname and model together
+   before using a provider key. Private repository environments require a
+   [GitHub plan that supports them](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#environment-secrets).
+   [GitHub environment setup](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
+
+| Setting | Default | Value |
+| --- | --- | --- |
+| `AI_REVIEW_API_KEY` | Required | Bearer token. The CLI also accepts `DEEPSEEK_API_KEY` as a legacy fallback. The workflow below uses the primary name. |
+| `AI_REVIEW_BASE_URL` | `https://api.deepseek.com` | Base URL, for example `https://llm.internal.example/v1`. The CLI appends `/chat/completions`. Use HTTPS, or HTTP on `localhost` or `127.0.0.1` for a local test. |
+| `AI_REVIEW_MODEL` | `deepseek-flash` | Exact model ID accepted by the endpoint. |
+
+The endpoint must support JSON object mode via
+`response_format: {"type": "json_object"}`.
+[DeepSeek JSON output](https://api-docs.deepseek.com/guides/json_mode/)
+
+## 3. Add and run the manual workflow
+
+Copy the example into `.github/workflows/ai-security-review.yml` in a PR and
+merge it to the default branch. This example assumes the default branch is
+`main` and the runner uses the labels from step 1. It builds the reviewer
+without the API key and then gives the key only to the fixture step. Keep the
+manual trigger for the initial pilot.
+[Manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+
+```yaml
+name: AI Security Review
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, ai-review]
+    environment: security-review
+    timeout-minutes: 20
+    steps:
+      - name: Check out the reviewer
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Build the reviewer
+        run: cargo +1.100.0 build --locked --release --bin ai-security-review
+      - name: Review the synthetic fixture
+        env:
+          AI_REVIEW_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+          AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+        run: |
+          target/release/ai-security-review . "$GITHUB_SHA" fixtures/policy.txt > review.json
+      - name: Upload the report
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ai-security-review
+          path: review.json
+          if-no-files-found: error
+          retention-days: 3
+```
+
+On GitHub, select **Actions → AI Security Review → Run workflow**, choose
+`main`, and open the run. Download **ai-security-review** under **Artifacts**.
+Check that `review.json` records the reviewed commit, the model, the fixture
+path, and coverage entries for all ten OWASP categories. A valid report can
+contain an empty findings list. Keep the report private and triage any findings
+before acting on them.
+
+If the workflow stays queued, check that a fresh runner is online and matches
+all labels. If the review step reports a missing key, check the secret name and
+environment branch rule. HTTP 401 usually means the model credential needs
+checking. HTTP 404 can indicate an incorrect base URL or model ID. For an
+invalid report, verify the provider supports JSON object mode and retry with the
+synthetic fixture.
+
+## Run locally or review a separate repo
+
+Build from a trusted reviewer checkout with
+`cargo +1.100.0 build --locked --release --bin ai-security-review`.
+For a local smoke run, set `AI_REVIEW_API_KEY` in your shell using your secret
+manager and run this from the reviewer checkout:
+
+```sh
+target/release/ai-security-review . "$(git rev-parse HEAD)" fixtures/policy.txt > review.json
+```
+
+For real source, pass a separate local Git checkout, the full commit SHA, and
+1–20 explicit UTF-8 paths relative to that repo. The total limit is 64 KiB. Review
+target files as data. Build and run the reviewer from its trusted checkout.
+
+```sh
+target/release/ai-security-review ../my-app "$TARGET_COMMIT" src/routes.rs src/auth.rs > review.json
+```
+
+For the next stage after the fixture, choose one private pilot repo and a small
+set of source files approved for the model. If Actions needs to fetch another
+private repo, give that checkout narrowly scoped read access. The automatically
+issued `GITHUB_TOKEN` is scoped to the workflow's repository.
+[GitHub token scope](https://docs.github.com/en/actions/concepts/security/github_token)
+
+See [SKILLS.md](SKILLS.md) for additional review guidance and [AGENTS.md](AGENTS.md)
+for maintainer and coding-agent instructions.
