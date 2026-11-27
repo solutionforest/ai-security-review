@@ -5,6 +5,15 @@ This repository's Rust CLI embeds its own source-only
 references for humans and coding agents reviewing the CLI, the runner setup,
 or a target application's source. The CLI does not load skill files at runtime.
 
+## Guidance embedded in the CLI
+
+The OWASP prompt's finding triage incorporates source-review principles from
+the [Cloudflare security-audit skill](https://github.com/cloudflare/security-audit-skill/blob/c1c8a8c1471069fb0e188eeaff69b8e8db6564a8/skills/security-audit/SKILL.md). It asks the model to explain
+the affected trust boundary, check nearby controls, and state exactly what
+evidence is missing. The CLI still makes a single tool-free model request.
+The synthetic smoke test checks that both OWASP and finding-triage instructions
+reach the mock API.
+
 ## Choose guidance for the change
 
 | Review area | Suggested guidance | What to check |
