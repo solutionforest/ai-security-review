@@ -1,0 +1,4 @@
+Synthetic review input for the first DeepSeek smoke run.
+The status route emits a constant "ok" message.
+The private profile route requires a session and looks up the profile by the
+account ID on that session.
