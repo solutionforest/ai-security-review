@@ -8,7 +8,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const PROMPT: &str = include_str!("owasp-review.md");
-const ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
+const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
+const DEFAULT_MODEL: &str = "deepseek-flash";
+const SECRET_VARS: [&str; 2] = ["AI_REVIEW_API_KEY", "DEEPSEEK_API_KEY"];
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 const MAX_FILES: usize = 20;
@@ -75,19 +77,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--help"] {
         println!("Usage: ai-security-review REPOSITORY COMMIT FILE [FILE ...]");
-        println!("Sends selected source to the hosted DeepSeek API. Set DEEPSEEK_API_KEY.");
+        println!("Sends selected source to an OpenAI-compatible chat completions API.");
+        println!("Set AI_REVIEW_API_KEY (or DEEPSEEK_API_KEY). Optional: AI_REVIEW_BASE_URL");
+        println!("(default {DEFAULT_BASE_URL}) and AI_REVIEW_MODEL (default {DEFAULT_MODEL}).");
         return Ok(());
     }
     let [repo, commit, paths @ ..] = args.as_slice() else {
         return Err("expected REPOSITORY COMMIT FILE [FILE ...]; see --help".into());
     };
     let files = collect_source(repo, commit, paths)?;
-    let key = std::env::var("DEEPSEEK_API_KEY").map_err(|_| "set DEEPSEEK_API_KEY")?;
-    if key.trim().is_empty() {
-        return Err("set DEEPSEEK_API_KEY to a nonempty value".into());
-    }
-    let review = request_review(&key, &files)?;
+    let provider = Provider::from_lookup(|name| std::env::var(name).ok())?;
+    let review = request_review(&provider, &files)?;
     let report = json!({
+        "model": provider.model,
         "reviewed_commit": commit,
         "reviewed_paths": files.keys().collect::<Vec<_>>(),
         "coverage": review.coverage,
@@ -95,6 +97,72 @@ fn run() -> Result<(), Box<dyn Error>> {
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+struct Provider {
+    endpoint: String,
+    key: String,
+    model: String,
+    deepseek: bool,
+}
+
+impl Provider {
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Box<dyn Error>> {
+        let set = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
+        let key = SECRET_VARS
+            .iter()
+            .find_map(|name| set(name))
+            .ok_or("set AI_REVIEW_API_KEY (or DEEPSEEK_API_KEY) to a nonempty value")?;
+        let base = set("AI_REVIEW_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.into());
+        let base = base.trim().trim_end_matches('/');
+        let host = base
+            .strip_prefix("https://")
+            .or_else(|| {
+                base.strip_prefix("http://")
+                    .filter(|rest| is_loopback(rest.split(['/', ':']).next().unwrap_or("")))
+            })
+            .ok_or("AI_REVIEW_BASE_URL must use https:// (http:// only for localhost)")?
+            .split(['/', ':'])
+            .next()
+            .unwrap_or("");
+        if host.is_empty()
+            || base.contains(['?', '#', '@'])
+            || base.chars().any(char::is_whitespace)
+        {
+            return Err(
+                "AI_REVIEW_BASE_URL must be a plain base URL such as https://host/v1".into(),
+            );
+        }
+        Ok(Self {
+            deepseek: host == "api.deepseek.com",
+            endpoint: format!("{base}/chat/completions"),
+            key,
+            model: set("AI_REVIEW_MODEL")
+                .map(|model| model.trim().to_owned())
+                .unwrap_or_else(|| DEFAULT_MODEL.into()),
+        })
+    }
+
+    fn body(&self, files: &BTreeMap<String, String>) -> Result<serde_json::Value, Box<dyn Error>> {
+        let mut body = json!({
+            "model": self.model,
+            "response_format": {"type": "json_object"},
+            "max_tokens": 4096,
+            "messages": [
+                {"role": "system", "content": PROMPT},
+                {"role": "user", "content": serde_json::to_string(files)?}
+            ]
+        });
+        if self.deepseek {
+            // DeepSeek-only switch; other providers may reject unknown fields.
+            body["thinking"] = json!({"type": "disabled"});
+        }
+        Ok(body)
+    }
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1")
 }
 
 fn collect_source(
@@ -147,7 +215,8 @@ fn git_read(repo: &str, args: &[&str], limit: usize) -> Result<Vec<u8>, Box<dyn 
         .args(["--no-replace-objects", "-C", repo])
         .args(args)
         .env("GIT_NO_LAZY_FETCH", "1")
-        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove(SECRET_VARS[0])
+        .env_remove(SECRET_VARS[1])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -166,52 +235,47 @@ fn git_read(repo: &str, args: &[&str], limit: usize) -> Result<Vec<u8>, Box<dyn 
     Ok(bytes)
 }
 
-fn request_review(key: &str, files: &BTreeMap<String, String>) -> Result<Review, Box<dyn Error>> {
+fn request_review(
+    provider: &Provider,
+    files: &BTreeMap<String, String>,
+) -> Result<Review, Box<dyn Error>> {
     let client = Client::builder()
         .timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let response = client
-        .post(ENDPOINT)
-        .bearer_auth(key)
-        .json(&json!({
-            "model": "deepseek-flash",
-            "thinking": {"type": "disabled"},
-            "response_format": {"type": "json_object"},
-            "max_tokens": 4096,
-            "messages": [
-                {"role": "system", "content": PROMPT},
-                {"role": "user", "content": serde_json::to_string(files)?}
-            ]
-        }))
-        .send()?;
+        .post(&provider.endpoint)
+        .bearer_auth(&provider.key)
+        .json(&provider.body(files)?)
+        .send()
+        .map_err(|_| "could not reach the model API")?;
     if !response.status().is_success() {
-        return Err(format!("DeepSeek returned HTTP {}", response.status().as_u16()).into());
+        return Err(format!("model API returned HTTP {}", response.status().as_u16()).into());
     }
     let mut body = Vec::new();
     response
         .take((MAX_RESPONSE_BYTES + 1) as u64)
         .read_to_end(&mut body)?;
     if body.len() > MAX_RESPONSE_BYTES {
-        return Err("DeepSeek response exceeded the size limit".into());
+        return Err("model API response exceeded the size limit".into());
     }
     parse_review(&body, files)
 }
 
 fn parse_review(body: &[u8], files: &BTreeMap<String, String>) -> Result<Review, Box<dyn Error>> {
     let completion: Completion =
-        serde_json::from_slice(body).map_err(|_| "invalid DeepSeek response envelope")?;
+        serde_json::from_slice(body).map_err(|_| "invalid model API response envelope")?;
     let [choice] = completion.choices.as_slice() else {
-        return Err("expected exactly one DeepSeek result".into());
+        return Err("expected exactly one model result".into());
     };
     if choice.finish_reason != "stop" {
-        return Err("DeepSeek did not finish the review".into());
+        return Err("the model did not finish the review".into());
     }
     let content = choice
         .message
         .content
         .as_deref()
-        .ok_or("DeepSeek returned no review")?;
+        .ok_or("the model returned no review")?;
     let review: Review = serde_json::from_str(content).map_err(|_| "invalid review JSON")?;
     let expected: BTreeSet<_> = (1..=10).map(|id| format!("A{id:02}:2025")).collect();
     if review.coverage.keys().ne(expected.iter()) {
