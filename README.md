@@ -22,10 +22,26 @@ smoke-tests a Linux Docker image, then pushes it to
 `ghcr.io/solutionforest/ai-security-review:<commit-sha>`. Download access
 depends on the GHCR package visibility and permissions.
 
-To build and exercise the image yourself on Linux with Docker and Python 3:
+### Build and run the Rust reviewer
+
+On Linux with Docker, build the image and run the Rust CLI inside it:
 
 ```sh
 docker build -t ai-security-review:local .
+docker run --rm ai-security-review:local --help
+```
+
+Docker compiles the CLI in a Rust build stage. The final image runs the compiled
+binary directly. To use the Rust binary without Docker, see
+[Run locally or review a separate repo](#run-locally-or-review-a-separate-repo).
+
+### Optional end-to-end smoke test
+
+The smoke-test helper uses Python 3 on the host to start a mock model API and
+verify the Rust CLI's JSON report. It uses synthetic source and needs no API
+key. This is the only step here that requires Python.
+
+```sh
 python3 scripts/smoke-test.py --image ai-security-review:local
 ```
 
