@@ -13,7 +13,27 @@ runs. The model endpoint still receives every selected path and its contents.
 Use the synthetic fixture first and send company source only to a provider
 approved for that repo.
 
-## 1. Prepare a Linux runner
+## GitHub-hosted CI and Docker images
+
+GitHub Actions runs Rust checks and a synthetic end-to-end review on pull
+requests and pushes to `main`. The smoke test uses a local stub for the model
+API and needs no API key. After the tests pass on `main`, Actions builds and
+smoke-tests a Linux Docker image, then pushes it to
+`ghcr.io/solutionforest/ai-security-review:<commit-sha>`. Download access
+depends on the GHCR package visibility and permissions.
+
+To build and exercise the image yourself on Linux with Docker and Python 3:
+
+```sh
+docker build -t ai-security-review:local .
+python3 scripts/smoke-test.py --image ai-security-review:local
+```
+
+The public workflow uses only synthetic source and a local stub. Run model
+reviews that use real company source or provider credentials from a separate
+private automation repo.
+
+## 1. Prepare a Linux runner for private reviews
 
 1. Provision a dedicated, disposable Linux VM. Use an unprivileged account for
    the runner. Give the VM access to GitHub Actions, the Rust toolchain and crate
@@ -31,7 +51,7 @@ approved for that repo.
    cargo +1.100.0 --version
    ```
 
-3. In the private reviewer repo, open **Settings → Actions → Runners →
+3. In your private automation repo, open **Settings → Actions → Runners →
    New self-hosted runner**. Select **Linux** and the VM's architecture.
    Run the download and checksum commands GitHub provides on the VM.
    Run its generated `./config.sh` command with
@@ -46,14 +66,14 @@ approved for that repo.
    [Ephemeral runners](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling)
 
 For an organization-managed runner, use a dedicated runner group restricted
-to the private reviewer repo. Restrict its workflow access to the protected
+to your private automation repo. Restrict its workflow access to the protected
 review workflow where available, and use the group along with the
 `ai-review` label in `runs-on`.
 [Runner group access](https://docs.github.com/en/enterprise-cloud@latest/actions/how-tos/manage-runners/self-hosted-runners/manage-access)
 
 ## 2. Set the provider and API secret
 
-1. In the private reviewer repo, open **Settings → Environments → New
+1. In your private automation repo, open **Settings → Environments → New
    environment** and name it `security-review`.
 2. Under **Deployment branches and tags**, choose **Selected branches and
    tags** and add a **Branch** rule for `main`. Protect `main` with your
@@ -80,8 +100,8 @@ The endpoint must support JSON object mode via
 
 ## 3. Add and run the manual workflow
 
-Copy the example into `.github/workflows/ai-security-review.yml` in a PR and
-merge it to the default branch. This example assumes the default branch is
+Copy the example into `.github/workflows/ai-security-review.yml` in your
+private automation repo and merge it to that repo's default branch. This example assumes the default branch is
 `main` and the runner uses the labels from step 1. It builds the reviewer
 without the API key and then gives the key only to the fixture step. Keep the
 manual trigger for the initial pilot.
@@ -104,6 +124,8 @@ jobs:
       - name: Check out the reviewer
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          repository: solutionforest/ai-security-review
+          ref: b443286d1569e85fcbaa14ef7a83f5fc077806e5
           persist-credentials: false
       - name: Build the reviewer
         run: cargo +1.100.0 build --locked --release --bin ai-security-review
@@ -113,7 +135,7 @@ jobs:
           AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
         run: |
-          target/release/ai-security-review . "$GITHUB_SHA" fixtures/policy.txt > review.json
+          target/release/ai-security-review . "$(git rev-parse HEAD)" fixtures/policy.txt > review.json
       - name: Upload the report
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:

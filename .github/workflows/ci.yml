@@ -1,0 +1,55 @@
+name: Test and build reviewer
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.100.0
+        run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt --component clippy
+      - name: Test the reviewer
+        run: |
+          cargo +1.100.0 fmt --all --check
+          cargo +1.100.0 test --locked
+          cargo +1.100.0 clippy --locked --all-targets -- -D warnings
+          cargo +1.100.0 build --locked --bin ai-security-review
+          python3 scripts/smoke-test.py target/debug/ai-security-review
+
+  image:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Build and smoke-test the Docker image
+        env:
+          IMAGE: ghcr.io/solutionforest/ai-security-review
+        run: |
+          docker build --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --tag "$IMAGE:$GITHUB_SHA" .
+          python3 scripts/smoke-test.py --image "$IMAGE:$GITHUB_SHA"
+      - name: Push the tested image to GHCR
+        env:
+          IMAGE: ghcr.io/solutionforest/ai-security-review
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$GITHUB_SHA"
