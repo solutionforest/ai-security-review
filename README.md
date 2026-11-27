@@ -1,5 +1,9 @@
 # AI Security Review
 
+> **Experimental** — Automated tests pass. Validation with a live model on
+> a private repository is planned. Treat findings as advisory and verify them
+> before acting.
+
 A Rust CLI for advisory source-code review against the
 [OWASP Web Application Top 10:2025](https://top10.owasp.org/2025/).
 It reads selected files at an exact Git commit, sends their text to an
